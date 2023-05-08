@@ -11,8 +11,8 @@ use Symfony\Component\EventDispatcher\GenericEvent;
  */
 class Plugin
 {
-    public static $name = 'Mail Services';
-    public static $description = 'Allows selling of Mailing Services';
+    public static $name = 'Floating IP Services';
+    public static $description = 'Allows selling of Floating IP Services';
     public static $help = '';
     public static $module = 'mail';
     public static $type = 'module';
@@ -26,10 +26,10 @@ class Plugin
         'DELETE_PENDING_DAYS' => 45,
         'SUSPEND_DAYS' => 14,
         'SUSPEND_WARNING_DAYS' => 7,
-        'TITLE' => 'Mail Services',
-        'MENUNAME' => 'Mail',
+        'TITLE' => 'Floating IP Services',
+        'MENUNAME' => 'Floating IPs',
         'EMAIL_FROM' => 'support@interserver.net',
-        'TBLNAME' => 'Mail',
+        'TBLNAME' => 'Floating IPs',
         'TABLE' => 'mail',
         'TITLE_FIELD' => 'mail_username',
         'TITLE_FIELD2' => 'mail_ip',
@@ -62,7 +62,7 @@ class Plugin
         $serviceTypes = run_event('get_service_types', false, self::$module);
         $serviceClass = $event->getSubject();
         myadmin_log(self::$module, 'info', self::$name.' Deactivation', __LINE__, __FILE__, self::$module, $serviceClass->getId());
-        if ($serviceTypes[$serviceClass->getType()]['services_type'] == get_service_define('MAIL_ZONEMTA')) {
+        if ($serviceTypes[$serviceClass->getType()]['services_type'] == get_service_define('FLOATING_IPS')) {
         } else {
             $GLOBALS['tf']->history->add(self::$module.'queue', $serviceClass->getId(), 'delete', '', $serviceClass->getCustid());
         }
@@ -83,7 +83,7 @@ class Plugin
                 $settings = get_module_settings(self::$module);
                 $serviceTypes = run_event('get_service_types', false, self::$module);
                 $db = get_module_db(self::$module);
-                if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('MAIL_ZONEMTA')) {
+                if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('FLOATING_IPS')) {
                     $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active' WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
                     $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
                 } else {
@@ -101,7 +101,7 @@ class Plugin
                 $serviceInfo = $service->getServiceInfo();
                 $settings = get_module_settings(self::$module);
                 $db = get_module_db(self::$module);
-                if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('MAIL_ZONEMTA')) {
+                if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('FLOATING_IPS')) {
                     $class = '\\MyAdmin\\Orm\\'.get_orm_class_from_table($settings['TABLE']);
                     /** @var \MyAdmin\Orm\Product $class **/
                     $serviceClass = new $class();
@@ -153,7 +153,7 @@ class Plugin
             })->setDisable(function ($service) {
                 $serviceInfo = $service->getServiceInfo();
                 $settings = get_module_settings(self::$module);
-                if ($serviceInfo[$settings['PREFIX'].'_type'] == 10665) {
+                if ($serviceInfo[$settings['PREFIX'].'_type'] == 110665) {
                     function_requirements('class.AcronisBackup');
                     $bkp = new \AcronisBackup($serviceInfo[$settings['PREFIX'].'_id']);
                     $response = $bkp->setCustomer(0);
@@ -165,7 +165,7 @@ class Plugin
                 $serviceInfo = $service->getServiceInfo();
                 $settings = get_module_settings(self::$module);
                 $serviceTypes = run_event('get_service_types', false, self::$module);
-                if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('MAIL_ZONEMTA')) {
+                if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('FLOATING_IPS')) {
                     $class = '\\MyAdmin\\Orm\\'.get_orm_class_from_table($settings['TABLE']);
                     /** @var \MyAdmin\Orm\Product $class **/
                     $serviceClass = new $class();
@@ -211,6 +211,6 @@ class Plugin
          **/
         $settings = $event->getSubject();
         $settings->setTarget('global');
-        $settings->add_dropdown_setting(self::$module, _('General'), 'outofstock_mail', _('Out Of Stock Mail'), _('Enable/Disable Sales Of This Type'), $settings->get_setting('OUTOFSTOCK_MAIL'), ['0', '1'], ['No', 'Yes']);
+        $settings->add_dropdown_setting(self::$module, _('General'), 'outofstock_floating_ips', _('Out Of Stock Floating IPs'), _('Enable/Disable Sales Of This Type'), $settings->get_setting('OUTOFSTOCK_FLOATING_IPS'), ['0', '1'], ['No', 'Yes']);
     }
 }

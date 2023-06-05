@@ -14,7 +14,7 @@ class Plugin
     public static $name = 'Floating IP Services';
     public static $description = 'Allows selling of Floating IP Services';
     public static $help = '';
-    public static $module = 'mail';
+    public static $module = 'floating_ips';
     public static $type = 'module';
     public static $settings = [
         'SERVICE_ID_OFFSET' => 1100,
@@ -30,10 +30,10 @@ class Plugin
         'MENUNAME' => 'Floating IPs',
         'EMAIL_FROM' => 'support@interserver.net',
         'TBLNAME' => 'Floating IPs',
-        'TABLE' => 'mail',
-        'TITLE_FIELD' => 'mail_username',
-        'TITLE_FIELD2' => 'mail_ip',
-        'PREFIX' => 'mail'];
+        'TABLE' => 'floating_ips',
+        'TITLE_FIELD' => 'floating_ip_username',
+        'TITLE_FIELD2' => 'floating_ip_ip',
+        'PREFIX' => 'floating_ip'];
 
     /**
      * Plugin constructor.

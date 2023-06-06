@@ -84,6 +84,18 @@ class Plugin
                 $serviceTypes = run_event('get_service_types', false, self::$module);
                 $db = get_module_db(self::$module);
                 if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('FLOATING_IPS')) {
+                    // pick an ip from ip pool
+                    $db->query("select * from floating_ip_pool where pool_usable=1 and pool_used=0 limit 1");
+                    if ($db->num_rows() > 0) {
+                        $db->next_record(MYSQL_ASSOC);
+                        $ip = $db->Record['pool_ip'];
+                        // assign ip
+
+                        // get switch from ip
+                        $db->query("select * from switchports where find_in_set((select ips_vlan from ips where ips_ip='216.219.92.1'), vlans)", __LINE__, __FILE__);
+                        // add ip route
+                        $cmds = ['config t', 'ip route 216.219.92.2/32 199.231.189.170', 'end', 'copy run st'];
+                    }
                     $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active' WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
                     $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
                 } else {

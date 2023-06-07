@@ -89,25 +89,26 @@ class Plugin
                     if ($db->num_rows() > 0) {
                         $db->next_record(MYSQL_ASSOC);
                         $ip = $db->Record['pool_ip'];
-                        // assign ip
-
+                        $targetIp = $serviceInfo[$settings['PREFIX'].'_target_ip'];
                         // get switch from ip
-                        $db->query("select * from switchports where find_in_set((select ips_vlan from ips where ips_ip='216.219.92.1'), vlans)", __LINE__, __FILE__);
-                        // add ip route
-                        $cmds = ['config t', 'ip route 216.219.92.2/32 199.231.189.170', 'end', 'copy run st'];
-
+                        $db->query("select name,ip from switchports left join switchmanager on switchmanager.id=switch where find_in_set((select ips_vlan from ips where ips_ip='{$targetIp}'), vlans) group by ip", __LINE__, __FILE__);
+                        if ($db->num_rows() > 0) {
+                            $db->next_record(MYSQL_ASSOC);
+                            $switchIp = $db->Record['ip'];
+                            // assign ip
+                            // add ip route
+                            $cmds = ['config t', 'ip route '.$ip.'/32 '.$targetIp, 'end', 'copy run st'];
+                            require_once INCLUDE_ROOT.'/servers/Cisco.php';
+                            $output = Cisco::run($switchIp, $cmds);
+                            myadmin_log('myadmin', 'info', 'Switch Output: '.json_encode($output), __LINE__, __FILE__);
+                            $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_ip='{$ip}', {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active' WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
+                            $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
+                        } else {
+                            myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
+                        }
+                    } else {
+                        myadmin_log('myadmin', 'error', 'no free ips in pool', __LINE__, __FILE__);
                     }
-                    $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active' WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
-                    $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
-                } else {
-                    $db->query('update '.$settings['TABLE'].' set '.$settings['PREFIX']."_status='pending-setup' where ".$settings['PREFIX']."_id='{$serviceInfo[$settings['PREFIX'].'_id']}'", __LINE__, __FILE__);
-                    $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'pending-setup', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
-                    $GLOBALS['tf']->history->add(self::$module.'queue', $serviceInfo[$settings['PREFIX'].'_id'], 'initial_install', '', $serviceInfo[$settings['PREFIX'].'_custid']);
-                    $smarty = new \TFSmarty();
-                    $smarty->assign('backup_name', $serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_name']);
-                    $email = $smarty->fetch('email/admin/mail_pending_setup.tpl');
-                    $subject = 'Backup '.$serviceInfo[$settings['TITLE_FIELD']].' Is Pending Setup';
-                    (new \MyAdmin\Mail())->adminMail($subject, $email, false, 'admin/backup_pending_setup.tpl');
                 }
             })->setReactivate(function ($service) {
                 $serviceTypes = run_event('get_service_types', false, self::$module);

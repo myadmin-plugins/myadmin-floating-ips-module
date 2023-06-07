@@ -31,8 +31,8 @@ class Plugin
         'EMAIL_FROM' => 'support@interserver.net',
         'TBLNAME' => 'Floating IPs',
         'TABLE' => 'floating_ips',
-        'TITLE_FIELD' => 'floating_ip_username',
-        'TITLE_FIELD2' => 'floating_ip_ip',
+        'TITLE_FIELD' => 'floating_ip_ip',
+        'TITLE_FIELD2' => 'floating_ip_target_ip',
         'PREFIX' => 'floating_ip'];
 
     /**
@@ -95,6 +95,7 @@ class Plugin
                         $db->query("select * from switchports where find_in_set((select ips_vlan from ips where ips_ip='216.219.92.1'), vlans)", __LINE__, __FILE__);
                         // add ip route
                         $cmds = ['config t', 'ip route 216.219.92.2/32 199.231.189.170', 'end', 'copy run st'];
+
                     }
                     $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active' WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
                     $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);

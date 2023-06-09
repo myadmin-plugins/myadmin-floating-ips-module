@@ -61,10 +61,31 @@ class Plugin
     {
         $serviceTypes = run_event('get_service_types', false, self::$module);
         $serviceClass = $event->getSubject();
+        $serviceInfo = $service->getServiceInfo();
+        $settings = get_module_settings(self::$module);
         myadmin_log(self::$module, 'info', self::$name.' Deactivation', __LINE__, __FILE__, self::$module, $serviceClass->getId());
         if ($serviceTypes[$serviceClass->getType()]['services_type'] == get_service_define('FLOATING_IPS')) {
-        } else {
-            $GLOBALS['tf']->history->add(self::$module.'queue', $serviceClass->getId(), 'delete', '', $serviceClass->getCustid());
+            $db = get_module_db(self::$module);
+            $ip = $serviceInfo[$settings['PREFIX'].'_ip'];
+            $targetIp = $serviceInfo[$settings['PREFIX'].'_target_ip'];
+            // get switch from ip
+            $db->query("select name,ip from switchports left join switchmanager on switchmanager.id=switch where find_in_set((select ips_vlan from ips where ips_ip='{$targetIp}'), vlans) group by ip", __LINE__, __FILE__);
+            if ($db->num_rows() > 0) {
+                $db->next_record(MYSQL_ASSOC);
+                $switchIp = $db->Record['ip'];
+                $switchName = $db->Record['name'];
+                // assign ip
+                // add ip route
+                $cmds = ['config t', 'no ip route '.$ip.'/32 '.$targetIp, 'end', 'copy run st'];
+                require_once INCLUDE_ROOT.'/servers/Cisco.php';
+                myadmin_log('myadmin', 'info', 'Running on Switch '.$switchName.': '.json_encode($cmds), __LINE__, __FILE__);
+                $output = \Cisco::run($switchIp, $cmds);
+                myadmin_log('myadmin', 'info', 'Output from Switch '.$switchName.': '.json_encode($output), __LINE__, __FILE__);
+                myadmin_log('myadmin', 'info', 'Raw Output from Switch '.$switchName.': '.json_encode(\Cisco::$output), __LINE__, __FILE__);
+                $GLOBALS['tf']->history->add(self::$module, $serviceInfo[$settings['PREFIX'].'_id'], 'disable', '', $serviceInfo[$settings['PREFIX'].'_custid']);
+            } else {
+                myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
+            }
         }
     }
 

@@ -169,6 +169,7 @@ class Plugin
                         } else {
                             myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
                         }
+                    }
                 }
                 $smarty = new \TFSmarty();
                 $smarty->assign('backup_name', $serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_name']);

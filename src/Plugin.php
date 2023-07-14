@@ -102,6 +102,7 @@ class Plugin
                 $serviceInfo = $service->getServiceInfo();
                 $settings = get_module_settings(self::$module);
                 $serviceTypes = run_event('get_service_types', false, self::$module);
+                $ipType = $serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_field1'] == 'path' ? 1 : 0;
                 if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('FLOATING_IPS')) {
                     // pick an ip from ip pool
                     $ip = false;
@@ -111,7 +112,7 @@ class Plugin
                         $db->next_record(MYSQL_ASSOC);
                         $ip = $db->Record['pool_ip'];
                     } else {
-                        $db->query("select * from floating_ip_pool where pool_usable=1 and pool_used=0 limit 1");
+                        $db->query("select * from floating_ip_pool where pool_usable=1 and pool_used=0 and pool_type='{$ipType}' limit 1");
                         if ($db->num_rows() > 0) {
                             $db->next_record(MYSQL_ASSOC);
                             $ip = $db->Record['pool_ip'];
@@ -148,6 +149,7 @@ class Plugin
                 $serviceInfo = $service->getServiceInfo();
                 $settings = get_module_settings(self::$module);
                 $db = get_module_db(self::$module);
+                $ipType = $serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_field1'] == 'path' ? 1 : 0;
                 if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('FLOATING_IPS')) {
                     $class = '\\MyAdmin\\Orm\\'.get_orm_class_from_table($settings['TABLE']);
                     /** @var \MyAdmin\Orm\Product $class **/
@@ -161,7 +163,7 @@ class Plugin
                         $db->next_record(MYSQL_ASSOC);
                         $ip = $db->Record['pool_ip'];
                     } else {
-                        $db->query("select * from floating_ip_pool where pool_usable=1 and pool_used=0 limit 1");
+                        $db->query("select * from floating_ip_pool where pool_usable=1 and pool_used=0 and pool_type='{$ipType}' limit 1");
                         if ($db->num_rows() > 0) {
                             $db->next_record(MYSQL_ASSOC);
                             $ip = $db->Record['pool_ip'];

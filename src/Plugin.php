@@ -271,5 +271,8 @@ class Plugin
         $settings = $event->getSubject();
         $settings->setTarget('global');
         $settings->add_dropdown_setting(self::$module, _('General'), 'outofstock_floating_ips', _('Out Of Stock Floating IPs'), _('Enable/Disable Sales Of This Type'), $settings->get_setting('OUTOFSTOCK_FLOATING_IPS'), ['0', '1'], ['No', 'Yes']);
+        $settings->add_text_setting(self::$module, _('Path.Net'), 'pathnet_username', _('Path.Net Username'), _('Path.Net Username'), $settings->get_setting('PATHNET_USERNAME'));
+        $settings->add_password_setting(self::$module, _('Path.Net'), 'pathnet_password', _('Path.Net Password'), _('Path.Net Password'), $settings->get_setting('PATHNET_PASSWORD'));
+
     }
 }

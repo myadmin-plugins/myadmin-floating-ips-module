@@ -103,49 +103,44 @@ class Plugin
                 $settings = get_module_settings(self::$module);
                 $serviceTypes = run_event('get_service_types', false, self::$module);
                 $db = get_module_db(self::$module);
-                if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_field1'] == 'scrub_current_ip') {
-                    $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_ip='{$serviceInfo[$settings['PREFIX'].'_target_ip']}', {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active', {$settings['PREFIX']}_target_ip = null WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
-                } else {
-                    $ipType = $serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_field1'] == 'path' ? 1 : 0;
-                    if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('FLOATING_IPS')) {
-                        // pick an ip from ip pool
-                        $ip = false;
-                        
-                        $db->query("select * from floating_ip_pool where pool_order={$serviceInfo[$settings['PREFIX'].'_id']} limit 1");
+                $ipType = $serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_field1'] == 'path' ? 1 : 0;
+                if ($serviceTypes[$serviceInfo[$settings['PREFIX'].'_type']]['services_type'] == get_service_define('FLOATING_IPS')) {
+                    // pick an ip from ip pool
+                    $ip = false;
+                    $db->query("select * from floating_ip_pool where pool_order={$serviceInfo[$settings['PREFIX'].'_id']} limit 1");
+                    if ($db->num_rows() > 0) {
+                        $db->next_record(MYSQL_ASSOC);
+                        $ip = $db->Record['pool_ip'];
+                    } else {
+                        $db->query("select * from floating_ip_pool where pool_usable=1 and pool_used=0 and pool_type='{$ipType}' limit 1");
                         if ($db->num_rows() > 0) {
                             $db->next_record(MYSQL_ASSOC);
                             $ip = $db->Record['pool_ip'];
-                        } else {
-                            $db->query("select * from floating_ip_pool where pool_usable=1 and pool_used=0 and pool_type='{$ipType}' limit 1");
-                            if ($db->num_rows() > 0) {
-                                $db->next_record(MYSQL_ASSOC);
-                                $ip = $db->Record['pool_ip'];
-                            }
                         }
-                        if ($ip !== false) {
-                            $targetIp = $serviceInfo[$settings['PREFIX'].'_target_ip'];
-                            // get switch from ip
-                            $db->query("select name,ip from switchports left join switchmanager on switchmanager.id=switch where find_in_set((select ips_vlan from ips where ips_ip='{$targetIp}'), vlans) group by ip", __LINE__, __FILE__);
-                            if ($db->num_rows() > 0) {
-                                $db->next_record(MYSQL_ASSOC);
-                                $switchIp = $db->Record['ip'];
-                                $switchName = $db->Record['name'];
-                                // assign ip
-                                // add ip route
-                                $cmds = ['config t', 'ip route '.$ip.'/32 '.$targetIp, 'end', 'copy run st'];
-                                myadmin_log('myadmin', 'info', 'Running on Switch '.$switchName.': '.json_encode($cmds), __LINE__, __FILE__);
-                                $output = Sshwitch::run($switchIp, $cmds);
-                                myadmin_log('myadmin', 'info', 'Output from Switch '.$switchName.': '.json_encode($output), __LINE__, __FILE__);
-                                myadmin_log('myadmin', 'info', 'Raw Output from Switch '.$switchName.': '.json_encode(Sshwitch::$output), __LINE__, __FILE__);
-                                $db->query("update floating_ip_pool set pool_used=1, pool_order={$serviceInfo[$settings['PREFIX'].'_id']} where pool_ip='{$ip}'", __LINE__, __FILE__);
-                                $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_ip='{$ip}', {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active' WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
-                                $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
-                            } else {
-                                myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
-                            }
+                    }
+                    if ($ip !== false) {
+                        $targetIp = $serviceInfo[$settings['PREFIX'].'_target_ip'];
+                        // get switch from ip
+                        $db->query("select name,ip from switchports left join switchmanager on switchmanager.id=switch where find_in_set((select ips_vlan from ips where ips_ip='{$targetIp}'), vlans) group by ip", __LINE__, __FILE__);
+                        if ($db->num_rows() > 0) {
+                            $db->next_record(MYSQL_ASSOC);
+                            $switchIp = $db->Record['ip'];
+                            $switchName = $db->Record['name'];
+                            // assign ip
+                            // add ip route
+                            $cmds = ['config t', 'ip route '.$ip.'/32 '.$targetIp, 'end', 'copy run st'];
+                            myadmin_log('myadmin', 'info', 'Running on Switch '.$switchName.': '.json_encode($cmds), __LINE__, __FILE__);
+                            $output = Sshwitch::run($switchIp, $cmds);
+                            myadmin_log('myadmin', 'info', 'Output from Switch '.$switchName.': '.json_encode($output), __LINE__, __FILE__);
+                            myadmin_log('myadmin', 'info', 'Raw Output from Switch '.$switchName.': '.json_encode(Sshwitch::$output), __LINE__, __FILE__);
+                            $db->query("update floating_ip_pool set pool_used=1, pool_order={$serviceInfo[$settings['PREFIX'].'_id']} where pool_ip='{$ip}'", __LINE__, __FILE__);
+                            $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_ip='{$ip}', {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active' WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
+                            $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
                         } else {
-                            myadmin_log('myadmin', 'error', 'no free ips in pool', __LINE__, __FILE__);
+                            myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
                         }
+                    } else {
+                        myadmin_log('myadmin', 'error', 'no free ips in pool', __LINE__, __FILE__);
                     }
                 }
             })->setReactivate(function ($service) {

@@ -81,7 +81,7 @@ class Plugin
                 $output = Sshwitch::run($switchIp, $cmds);
                 myadmin_log('myadmin', 'info', 'Output from Switch '.$switchName.': '.json_encode($output), __LINE__, __FILE__);
                 myadmin_log('myadmin', 'info', 'Raw Output from Switch '.$switchName.': '.json_encode(Sshwitch::$output), __LINE__, __FILE__);
-                $GLOBALS['tf']->history->add(self::$module, $serviceClass->getId(), 'disable', '', $serviceClass->getCustid());
+                \MyAdmin\App::history()->add(self::$module, $serviceClass->getId(), 'disable', '', $serviceClass->getCustid());
             } else {
                 myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
             }
@@ -135,7 +135,7 @@ class Plugin
                             myadmin_log('myadmin', 'info', 'Raw Output from Switch '.$switchName.': '.json_encode(Sshwitch::$output), __LINE__, __FILE__);
                             $db->query("update floating_ip_pool set pool_used=1, pool_order={$serviceInfo[$settings['PREFIX'].'_id']} where pool_ip='{$ip}'", __LINE__, __FILE__);
                             $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_ip='{$ip}', {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active' WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
-                            $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
+                            \MyAdmin\App::history()->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
                         } else {
                             myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
                         }
@@ -185,7 +185,7 @@ class Plugin
                             myadmin_log('myadmin', 'info', 'Raw Output from Switch '.$switchName.': '.json_encode(Sshwitch::$output), __LINE__, __FILE__);
                             $db->query("update floating_ip_pool set pool_used=1, pool_order={$serviceInfo[$settings['PREFIX'].'_id']} where pool_ip='{$ip}'", __LINE__, __FILE__);
                             $db->query("UPDATE {$settings['TABLE']} SET {$settings['PREFIX']}_ip='{$ip}', {$settings['PREFIX']}_status='active', {$settings['PREFIX']}_server_status='active' WHERE {$settings['PREFIX']}_id='".$serviceInfo[$settings['PREFIX'].'_id']."'", __LINE__, __FILE__);
-                            $GLOBALS['tf']->history->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
+                            \MyAdmin\App::history()->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
                         } else {
                             myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
                         }
@@ -216,7 +216,7 @@ class Plugin
                         $output = Sshwitch::run($switchIp, $cmds);
                         myadmin_log('myadmin', 'info', 'Output from Switch '.$switchName.': '.json_encode($output), __LINE__, __FILE__);
                         myadmin_log('myadmin', 'info', 'Raw Output from Switch '.$switchName.': '.json_encode(Sshwitch::$output), __LINE__, __FILE__);
-                        $GLOBALS['tf']->history->add(self::$module, $serviceInfo[$settings['PREFIX'].'_id'], 'disable', '', $serviceInfo[$settings['PREFIX'].'_custid']);
+                        \MyAdmin\App::history()->add(self::$module, $serviceInfo[$settings['PREFIX'].'_id'], 'disable', '', $serviceInfo[$settings['PREFIX'].'_custid']);
                     } else {
                         myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
                     }
@@ -248,7 +248,7 @@ class Plugin
                         myadmin_log('myadmin', 'info', 'Output from Switch '.$switchName.': '.json_encode($output), __LINE__, __FILE__);
                         myadmin_log('myadmin', 'info', 'Raw Output from Switch '.$switchName.': '.json_encode(Sshwitch::$output), __LINE__, __FILE__);
                         $serviceClass->setServerStatus('deleted')->save();
-                        $GLOBALS['tf']->history->add($settings['TABLE'], 'change_server_status', 'deleted', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
+                        \MyAdmin\App::history()->add($settings['TABLE'], 'change_server_status', 'deleted', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
                     } else {
                         myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
                     }

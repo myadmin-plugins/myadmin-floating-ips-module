@@ -138,9 +138,11 @@ class Plugin
                             \MyAdmin\App::history()->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
                         } else {
                             myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
+                            chatNotify('Failed [Floating IP '.$serviceInfo[$settings['PREFIX'].'_id'].'](https://my.interserver.net/admin/view_floating_ip?id='.$serviceInfo[$settings['PREFIX'].'_id'].') Activation - assigned pool IP '.$ip.' but no switch found in switchports for target IP '.$targetIp.' (cannot add route)', 'notifications');
                         }
                     } else {
                         myadmin_log('myadmin', 'error', 'no free ips in pool', __LINE__, __FILE__);
+                        chatNotify('Failed [Floating IP '.$serviceInfo[$settings['PREFIX'].'_id'].'](https://my.interserver.net/admin/view_floating_ip?id='.$serviceInfo[$settings['PREFIX'].'_id'].') Activation - no free IPs in floating_ip_pool (type='.$ipType.', target='.$targetIp.')', 'notifications');
                     }
                 }
             })->setReactivate(function ($service) {
@@ -188,6 +190,7 @@ class Plugin
                             \MyAdmin\App::history()->add($settings['TABLE'], 'change_status', 'active', $serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_custid']);
                         } else {
                             myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
+                            chatNotify('Failed [Floating IP '.$serviceInfo[$settings['PREFIX'].'_id'].'](https://my.interserver.net/admin/view_floating_ip?id='.$serviceInfo[$settings['PREFIX'].'_id'].') Reactivation - assigned pool IP '.$ip.' but no switch found in switchports for target IP '.$targetIp.' (cannot add route)', 'notifications');
                         }
                     }
                 }

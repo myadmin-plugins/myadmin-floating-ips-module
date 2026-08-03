@@ -4,7 +4,12 @@ namespace Detain\MyAdminFloatingIps\Tests;
 
 use PHPUnit\Framework\TestCase;
 use Detain\MyAdminFloatingIps\Plugin;
+use Detain\MyAdminFloatingIps\Tests\Support\DbDouble;
+use Detain\MyAdminFloatingIps\Tests\Support\FrameworkSpy;
+use MyAdmin\App;
 use ReflectionClass;
+use Symfony\Component\EventDispatcher\EventDispatcher;
+use Symfony\Component\EventDispatcher\GenericEvent;
 
 /**
  * Test suite for the Detain\MyAdminFloatingIps\Plugin class.
@@ -392,13 +397,56 @@ class PluginTest extends TestCase
     }
 
     /**
-     * Verify the expected number of settings keys.
+     * The settings map is what MyAdmin builds this module's SQL identifiers from, so
+     * the field names have to belong to the table the prefix names. A mismatch here
+     * produces "unknown column" errors on every listing page.
+     *
+     * This replaces an assertion that Plugin::$settings had exactly 16 keys. A key
+     * count says nothing about whether the settings are usable, and it broke the
+     * moment a setting was legitimately added (there are now 17). The keys
+     * themselves are asserted by testSettingsContainsAllExpectedKeys().
      *
      * @return void
      */
-    public function testSettingsKeyCount(): void
+    public function testSettingsDescribeConsistentSqlIdentifiers(): void
     {
-        $this->assertCount(16, Plugin::$settings);
+        $prefix = Plugin::$settings['PREFIX'];
+        $this->assertNotSame('', $prefix);
+        $this->assertMatchesRegularExpression('/^[a-z][a-z0-9_]*$/', $prefix, 'PREFIX is used raw in SQL');
+        $this->assertMatchesRegularExpression('/^[a-z][a-z0-9_]*$/', Plugin::$settings['TABLE'], 'TABLE is used raw in SQL');
+        $this->assertStringStartsWith($prefix, Plugin::$settings['TABLE']);
+
+        foreach (['TITLE_FIELD', 'TITLE_FIELD2'] as $fieldSetting) {
+            $this->assertStringStartsWith(
+                $prefix . '_',
+                Plugin::$settings[$fieldSetting],
+                "{$fieldSetting} must name a column of the {$prefix} table"
+            );
+        }
+    }
+
+    /**
+     * The lifecycle day counts drive the dunning schedule: a customer is warned,
+     * then suspended, then the service is deleted. If that order is ever inverted a
+     * service gets deleted before anyone is told, so assert the ordering rather than
+     * just the individual values.
+     *
+     * @return void
+     */
+    public function testSettingsDescribeAWorkableDunningSchedule(): void
+    {
+        $warning = Plugin::$settings['SUSPEND_WARNING_DAYS'];
+        $suspend = Plugin::$settings['SUSPEND_DAYS'];
+        $delete = Plugin::$settings['DELETE_PENDING_DAYS'];
+
+        $this->assertGreaterThan(0, $warning);
+        $this->assertGreaterThan($warning, $suspend, 'Customers must be warned before suspension');
+        $this->assertGreaterThan($suspend, $delete, 'Services must be suspended before deletion');
+        $this->assertGreaterThan(0, Plugin::$settings['SERVICE_ID_OFFSET']);
+        $this->assertNotFalse(
+            filter_var(Plugin::$settings['EMAIL_FROM'], FILTER_VALIDATE_EMAIL),
+            'EMAIL_FROM is the envelope sender for this module\'s mail'
+        );
     }
 
     /**
@@ -851,15 +899,148 @@ class PluginTest extends TestCase
         $this->assertStringContainsString('myadmin_log(', $source);
     }
 
+    // ---------------------------------------------------------------
+    //  Deactivation behaviour
+    //
+    //  These replace an assertion that grepped the source for the string
+    //  'history->add('. That told us nothing about whether history is actually
+    //  recorded, and it broke as soon as the call was legitimately migrated from
+    //  $GLOBALS['tf']->history to the \MyAdmin\App::history() facade. The hook is
+    //  now dispatched for real and asserted on by what it did.
+    // ---------------------------------------------------------------
+
     /**
-     * Verify the source file uses the history tracking system.
+     * Deactivating a floating IP tears the /32 route back off the switch that
+     * carries the target IP's VLAN, and records the disable against the service so
+     * the customer-visible history shows it.
      *
      * @return void
      */
-    public function testSourceContainsHistoryTracking(): void
+    public function testDeactivateRemovesSwitchRouteAndRecordsHistory(): void
     {
-        $source = file_get_contents($this->reflection->getFileName());
-        $this->assertStringContainsString('history->add(', $source);
+        FrameworkSpy::reset();
+        FrameworkSpy::$serviceTypes = [
+            7 => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
+        ];
+        DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+
+        $this->dispatchDeactivate(7);
+
+        $this->assertCount(1, FrameworkSpy::$switchCommands);
+        $this->assertSame('10.9.0.1', FrameworkSpy::$switchCommands[0]['ip']);
+        $this->assertSame(
+            ['config t', 'no ip route 192.0.2.50/32 198.51.100.10', 'end', 'copy run st'],
+            FrameworkSpy::$switchCommands[0]['cmds']
+        );
+        $this->assertSame(
+            [[Plugin::$module, 4242, 'disable', '', 777]],
+            FrameworkSpy::$history
+        );
+        $this->assertNotEmpty(
+            DbDouble::queriesMatching("ips_ip='198.51.100.10'"),
+            'The switch is located by the VLAN of the target IP'
+        );
+    }
+
+    /**
+     * If no switch carries the target IP's VLAN there is no route to remove, so the
+     * handler must log the problem and leave the service history alone rather than
+     * claim the IP was disabled.
+     *
+     * @return void
+     */
+    public function testDeactivateLogsErrorAndSkipsHistoryWhenNoSwitchFound(): void
+    {
+        FrameworkSpy::reset();
+        FrameworkSpy::$serviceTypes = [
+            7 => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
+        ];
+        DbDouble::willReturnRows([]);
+
+        $this->dispatchDeactivate(7);
+
+        $this->assertSame([], FrameworkSpy::$switchCommands);
+        $this->assertSame([], FrameworkSpy::$history);
+        $errors = FrameworkSpy::logsWithLevel('error');
+        $this->assertCount(1, $errors);
+        $this->assertStringContainsString('198.51.100.10', $errors[0][2]);
+    }
+
+    /**
+     * The vps/webhosting/etc services that share the deactivate event must pass
+     * straight through: no switch commands, no history, no database work.
+     *
+     * @return void
+     */
+    public function testDeactivateIgnoresServicesOfOtherTypes(): void
+    {
+        FrameworkSpy::reset();
+        FrameworkSpy::$serviceTypes = [
+            7 => ['services_type' => 999, 'services_field1' => 'path'],
+        ];
+        DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+
+        $this->dispatchDeactivate(7);
+
+        $this->assertSame([], FrameworkSpy::$switchCommands);
+        $this->assertSame([], FrameworkSpy::$history);
+        $this->assertSame([], DbDouble::$queries);
+    }
+
+    /**
+     * Dispatch floating_ips.deactivate through a real dispatcher with the hooks the
+     * plugin advertises, exactly as MyAdmin wires them up.
+     *
+     * @param  int|string $serviceType
+     * @return void
+     */
+    private function dispatchDeactivate($serviceType): void
+    {
+        $dispatcher = new EventDispatcher();
+        foreach (Plugin::getHooks() as $hookName => $callback) {
+            $this->assertIsCallable($callback, "Hook {$hookName} is registered but is not callable");
+            $dispatcher->addListener($hookName, $callback);
+        }
+
+        $service = new class ($serviceType) {
+            /** @var int|string */
+            private $type;
+
+            /**
+             * @param int|string $type
+             */
+            public function __construct($type)
+            {
+                $this->type = $type;
+            }
+
+            public function getId()
+            {
+                return 4242;
+            }
+
+            public function getCustid()
+            {
+                return 777;
+            }
+
+            public function getType()
+            {
+                return $this->type;
+            }
+
+            public function getIp()
+            {
+                return '192.0.2.50';
+            }
+
+            public function getTargetIp()
+            {
+                return '198.51.100.10';
+            }
+        };
+
+        $dispatcher->dispatch(new GenericEvent($service), Plugin::$module . '.deactivate');
     }
 
     /**

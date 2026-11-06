@@ -754,7 +754,7 @@ class PluginTest extends TestCase
         $ownMethods = array_filter($methods, function (\ReflectionMethod $m) {
             return $m->getDeclaringClass()->getName() === Plugin::class;
         });
-        $this->assertCount(5, $ownMethods);
+        $this->assertCount(6, $ownMethods);
     }
 
     /**
@@ -764,7 +764,7 @@ class PluginTest extends TestCase
      */
     public function testExpectedPublicMethods(): void
     {
-        $expected = ['__construct', 'getHooks', 'getDeactivate', 'loadProcessing', 'getSettings'];
+        $expected = ['__construct', 'getHooks', 'getDeactivate', 'cleanupPathNet', 'loadProcessing', 'getSettings'];
         foreach ($expected as $method) {
             $this->assertTrue(
                 $this->reflection->hasMethod($method),
@@ -985,6 +985,191 @@ class PluginTest extends TestCase
         $this->assertSame([], FrameworkSpy::$switchCommands);
         $this->assertSame([], FrameworkSpy::$history);
         $this->assertSame([], DbDouble::$queries);
+    }
+
+    // ---------------------------------------------------------------
+    //  Path.net cleanup on cancel
+    // ---------------------------------------------------------------
+
+    /**
+     * Path.net double: hands back the configured rule/filter lists for an ip and
+     * records every call.
+     *
+     * @param  array<int, array<string, mixed>> $rules
+     * @param  array<int, array<string, mixed>> $filters
+     * @param  array<string, mixed>             $deleteResponse
+     * @return object
+     */
+    private function pathNetDouble(array $rules, array $filters, array $deleteResponse = ['acknowledged' => true])
+    {
+        return new class ($rules, $filters, $deleteResponse) {
+            /** @var array<int, array<int, mixed>> */
+            public $calls = [];
+            /** @var array<int, array<string, mixed>> */
+            private $rules;
+            /** @var array<int, array<string, mixed>> */
+            private $filters;
+            /** @var array<string, mixed> */
+            private $deleteResponse;
+
+            public function __construct(array $rules, array $filters, array $deleteResponse)
+            {
+                $this->rules = $rules;
+                $this->filters = $filters;
+                $this->deleteResponse = $deleteResponse;
+            }
+
+            public function rules($destination = null)
+            {
+                $this->calls[] = ['rules', $destination];
+                return ['rules' => $this->rules];
+            }
+
+            public function getFilter($addr)
+            {
+                $this->calls[] = ['getFilter', $addr];
+                return ['filters' => $this->filters];
+            }
+
+            public function deleteRule($ruleId)
+            {
+                $this->calls[] = ['deleteRule', $ruleId];
+                return $this->deleteResponse;
+            }
+
+            public function deleteFilter($type, $id)
+            {
+                $this->calls[] = ['deleteFilter', $type, $id];
+                return $this->deleteResponse;
+            }
+        };
+    }
+
+    /**
+     * @return void
+     */
+    protected function tearDown(): void
+    {
+        Plugin::$pathNetFactory = null;
+    }
+
+    /**
+     * Canceling a Path.net floating ip deletes the rules and filters listed for
+     * that ip, so the next owner of the pool ip does not inherit them.
+     *
+     * @return void
+     */
+    public function testDeactivateOfPathNetIpDeletesItsRulesAndFilters(): void
+    {
+        FrameworkSpy::reset();
+        FrameworkSpy::$serviceTypes = [
+            Plugin::PATHNET_SERVICE_TYPE => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
+        ];
+        DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+        $pathNet = $this->pathNetDouble(
+            [['id' => 'r-1', 'destination' => '192.0.2.50/32'], ['id' => 'r-other', 'destination' => '192.0.2.99/32']],
+            [['id' => 'f-1', 'name' => 'udp_flood']]
+        );
+        Plugin::$pathNetFactory = function () use ($pathNet) {
+            return $pathNet;
+        };
+
+        $this->dispatchDeactivate(Plugin::PATHNET_SERVICE_TYPE);
+
+        $this->assertContains(['rules', '192.0.2.50'], $pathNet->calls);
+        $this->assertContains(['getFilter', '192.0.2.50'], $pathNet->calls);
+        $this->assertContains(['deleteRule', 'r-1'], $pathNet->calls);
+        $this->assertNotContains(['deleteRule', 'r-other'], $pathNet->calls, 'a rule for another destination is left alone');
+        $this->assertContains(['deleteFilter', 'udp_flood', 'f-1'], $pathNet->calls);
+        $this->assertSame([], FrameworkSpy::$notifications);
+        $this->assertCount(1, FrameworkSpy::$switchCommands, 'the route is still removed');
+    }
+
+    /**
+     * A floating ip without the Path.net package never builds a Path.net client.
+     *
+     * @return void
+     */
+    public function testDeactivateOfPlainFloatingIpSkipsPathNet(): void
+    {
+        FrameworkSpy::reset();
+        FrameworkSpy::$serviceTypes = [
+            7 => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
+        ];
+        DbDouble::willReturnRows([]);
+        $built = false;
+        Plugin::$pathNetFactory = function () use (&$built) {
+            $built = true;
+            return $this->pathNetDouble([], []);
+        };
+
+        $this->dispatchDeactivate(7);
+
+        $this->assertFalse($built);
+    }
+
+    /**
+     * A Path.net failure is reported to staff but never breaks the cancel: the
+     * handler returns normally and the switch route is still removed.
+     *
+     * @return void
+     */
+    public function testPathNetFailureIsReportedAndDoesNotBlockTheCancel(): void
+    {
+        FrameworkSpy::reset();
+        FrameworkSpy::$serviceTypes = [
+            Plugin::PATHNET_SERVICE_TYPE => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
+        ];
+        DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+        $pathNet = $this->pathNetDouble([['id' => 'r-1', 'destination' => '192.0.2.50']], [], ['detail' => 'Not Found']);
+        Plugin::$pathNetFactory = function () use ($pathNet) {
+            return $pathNet;
+        };
+
+        $this->dispatchDeactivate(Plugin::PATHNET_SERVICE_TYPE);
+
+        $this->assertCount(1, FrameworkSpy::$switchCommands);
+        $this->assertCount(1, FrameworkSpy::$notifications);
+        $this->assertStringContainsString('r-1', FrameworkSpy::$notifications[0][0]);
+        $this->assertNotEmpty(FrameworkSpy::logsWithLevel('error'));
+    }
+
+    /**
+     * An exception from the Path.net client is caught and reported.
+     *
+     * @return void
+     */
+    public function testPathNetExceptionIsCaught(): void
+    {
+        FrameworkSpy::reset();
+        Plugin::$pathNetFactory = function () {
+            throw new \RuntimeException('token refused');
+        };
+
+        $this->assertFalse(Plugin::cleanupPathNet(4242, '192.0.2.50'));
+        $this->assertCount(1, FrameworkSpy::$notifications);
+        $this->assertStringContainsString('token refused', FrameworkSpy::$notifications[0][0]);
+    }
+
+    /**
+     * Without a valid single ip nothing is sent: an empty addr/destination filter
+     * would cover the whole Path.net account.
+     *
+     * @return void
+     */
+    public function testCleanupRefusesAnInvalidIp(): void
+    {
+        FrameworkSpy::reset();
+        $built = false;
+        Plugin::$pathNetFactory = function () use (&$built) {
+            $built = true;
+            return $this->pathNetDouble([], []);
+        };
+
+        $this->assertFalse(Plugin::cleanupPathNet(4242, ''));
+        $this->assertFalse(Plugin::cleanupPathNet(4242, '192.0.2.0/24'));
+        $this->assertFalse($built);
+        $this->assertCount(2, FrameworkSpy::$notifications);
     }
 
     /**

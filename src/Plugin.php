@@ -37,6 +37,18 @@ class Plugin
         'PREFIX' => 'floating_ip'];
 
     /**
+     * Service type of the Floating IP + Path.net package: the only type whose ip
+     * carries Path.net filters and firewall rules.
+     */
+    public const PATHNET_SERVICE_TYPE = 11461;
+
+    /**
+     * Builds the Path.net API client for cleanupPathNet(); tests swap in a double.
+     * @var callable|null fn(): object with rules(), getFilter(), deleteRule(), deleteFilter()
+     */
+    public static $pathNetFactory = null;
+
+    /**
      * Plugin constructor.
      */
     public function __construct()
@@ -85,7 +97,89 @@ class Plugin
             } else {
                 myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
             }
+            if ($serviceClass->getType() == self::PATHNET_SERVICE_TYPE) {
+                // the ip goes back to the pool: its next owner must not inherit this customer's Path.net rules
+                self::cleanupPathNet($serviceClass->getId(), $ip);
+            }
         }
+    }
+
+    /**
+     * Deletes every Path.net firewall rule and filter for a canceled floating ip.
+     *
+     * Runs from getDeactivate(), once per cancel. It never throws and never stops
+     * the cancel: a failure is logged and posted to chat for staff to clean up by
+     * hand. The rules and filters are listed for the ip and deleted one by one
+     * through the same per-id calls the client page uses (rules whose destination
+     * is not this ip are left alone). PathNet::deleteRuleByIp() is not used: it
+     * sends DELETE /rules, a route the Path.net API does not define (its bulk
+     * delete is DELETE /rules/), and an empty ip in either bulk delete would be
+     * an account-wide filter.
+     *
+     * @param int|string $serviceId floating ip service id (for the logs)
+     * @param string     $ip        the floating ip
+     * @return bool true when everything listed was deleted
+     */
+    public static function cleanupPathNet($serviceId, $ip)
+    {
+        $ip = is_string($ip) ? trim($ip) : '';
+        $label = 'Floating IP '.$serviceId.' ('.$ip.')';
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+            myadmin_log(self::$module, 'error', 'Path.net cleanup skipped for floating ip '.$serviceId.': invalid ip '.json_encode($ip), __LINE__, __FILE__, self::$module, $serviceId);
+            chatNotify($label.' canceled but its Path.net rules/filters were not cleaned up: invalid ip', 'notifications');
+            return false;
+        }
+        $deleted = 0;
+        $failed = [];
+        try {
+            if (self::$pathNetFactory !== null) {
+                $pathNet = call_user_func(self::$pathNetFactory);
+            } else {
+                function_requirements('class.PathNet');
+                $pathNet = new \PathNet();
+            }
+            $rules = $pathNet->rules($ip);
+            $filters = $pathNet->getFilter($ip);
+            if (!isset($rules['rules']) || !is_array($rules['rules']) || !isset($filters['filters']) || !is_array($filters['filters'])) {
+                $failed[] = 'listing failed (rules: '.json_encode($rules).' filters: '.json_encode($filters).')';
+            } else {
+                foreach ($rules['rules'] as $rule) {
+                    $ruleId = is_array($rule) ? trim((string) ($rule['id'] ?? '')) : '';
+                    $destination = is_array($rule) ? (string) ($rule['destination'] ?? '') : '';
+                    if ($ruleId === '' || ($destination !== $ip && $destination !== $ip.'/32')) {
+                        continue;
+                    }
+                    $response = $pathNet->deleteRule($ruleId);
+                    if (isset($response['acknowledged'])) {
+                        $deleted++;
+                    } else {
+                        $failed[] = 'rule '.$ruleId.': '.json_encode($response);
+                    }
+                }
+                foreach ($filters['filters'] as $filter) {
+                    $filterId = is_array($filter) ? trim((string) ($filter['id'] ?? '')) : '';
+                    $filterName = is_array($filter) ? trim((string) ($filter['name'] ?? '')) : '';
+                    if ($filterId === '' || $filterName === '') {
+                        continue;
+                    }
+                    $response = $pathNet->deleteFilter($filterName, $filterId);
+                    if (isset($response['acknowledged'])) {
+                        $deleted++;
+                    } else {
+                        $failed[] = 'filter '.$filterName.'/'.$filterId.': '.json_encode($response);
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            $failed[] = get_class($e).': '.$e->getMessage();
+        }
+        if (empty($failed)) {
+            myadmin_log(self::$module, 'info', 'Path.net cleanup for floating ip '.$serviceId.' ('.$ip.') removed '.$deleted.' rule(s)/filter(s)', __LINE__, __FILE__, self::$module, $serviceId);
+            return true;
+        }
+        myadmin_log(self::$module, 'error', 'Path.net cleanup for floating ip '.$serviceId.' ('.$ip.') removed '.$deleted.', failed: '.implode('; ', $failed), __LINE__, __FILE__, self::$module, $serviceId);
+        chatNotify($label.' canceled but its Path.net cleanup did not finish ('.$deleted.' removed; '.implode('; ', $failed).') - please remove what is left by hand', 'notifications');
+        return false;
     }
 
     /**

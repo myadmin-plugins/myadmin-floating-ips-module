@@ -1066,9 +1066,10 @@ class PluginTest extends TestCase
             Plugin::PATHNET_SERVICE_TYPE => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
         ];
         DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+        DbDouble::willReturnRowsFor('from floating_ips where', []);
         $pathNet = $this->pathNetDouble(
             [['id' => 'r-1', 'destination' => '192.0.2.50/32'], ['id' => 'r-other', 'destination' => '192.0.2.99/32']],
-            [['id' => 'f-1', 'name' => 'udp_flood']]
+            [['id' => 'f-1', 'name' => 'udp_flood', 'settings' => ['addr' => '192.0.2.50']]]
         );
         Plugin::$pathNetFactory = function () use ($pathNet) {
             return $pathNet;
@@ -1083,6 +1084,91 @@ class PluginTest extends TestCase
         $this->assertContains(['deleteFilter', 'udp_flood', 'f-1'], $pathNet->calls);
         $this->assertSame([], FrameworkSpy::$notifications);
         $this->assertCount(1, FrameworkSpy::$switchCommands, 'the route is still removed');
+    }
+
+    /**
+     * Canceling a service that is already canceled (cancel_service() does not
+     * refuse it) must not touch Path.net: the pool may have handed the ip on.
+     *
+     * @return void
+     */
+    public function testRecancelOfCanceledServiceLeavesPathNetAlone(): void
+    {
+        foreach (['canceled', 'expired'] as $status) {
+            FrameworkSpy::reset();
+            FrameworkSpy::$serviceTypes = [
+                Plugin::PATHNET_SERVICE_TYPE => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
+            ];
+            DbDouble::willReturnRows([]);
+            $built = false;
+            Plugin::$pathNetFactory = function () use (&$built) {
+                $built = true;
+                return $this->pathNetDouble([], []);
+            };
+
+            $this->dispatchDeactivate(Plugin::PATHNET_SERVICE_TYPE, $status);
+
+            $this->assertFalse($built, "a service that was already {$status} must not clean up");
+            $this->assertSame([], DbDouble::queriesMatching('from floating_ips where'));
+        }
+    }
+
+    /**
+     * When another live floating ip service holds the same ip, the rules on it are
+     * that customer's: nothing is deleted.
+     *
+     * @return void
+     */
+    public function testCancelLeavesPathNetAloneWhenTheIpIsReassigned(): void
+    {
+        FrameworkSpy::reset();
+        FrameworkSpy::$serviceTypes = [
+            Plugin::PATHNET_SERVICE_TYPE => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
+        ];
+        DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+        DbDouble::willReturnRowsFor('from floating_ips where', [['floating_ip_id' => 2685]]);
+        $built = false;
+        Plugin::$pathNetFactory = function () use (&$built) {
+            $built = true;
+            return $this->pathNetDouble([], []);
+        };
+
+        $this->dispatchDeactivate(Plugin::PATHNET_SERVICE_TYPE);
+
+        $this->assertFalse($built);
+        $holderQuery = DbDouble::queriesMatching('from floating_ips where');
+        $this->assertCount(1, $holderQuery);
+        $this->assertStringContainsString("floating_ip_ip='192.0.2.50'", $holderQuery[0]);
+        $this->assertStringContainsString('floating_ip_id != 4242', $holderQuery[0]);
+        $this->assertStringContainsString("not in ('canceled','expired')", $holderQuery[0]);
+        $this->assertCount(1, FrameworkSpy::$switchCommands, 'the cancel itself goes on');
+    }
+
+    /**
+     * A filter whose addr is not this ip is never deleted, even when Path.net
+     * lists it for the ip; staff are told about it.
+     *
+     * @return void
+     */
+    public function testFilterForAnotherAddrIsLeftAlone(): void
+    {
+        FrameworkSpy::reset();
+        $pathNet = $this->pathNetDouble([], [
+            ['id' => 'f-own', 'name' => 'udp_flood', 'addr' => '192.0.2.50/32'],
+            ['id' => 'f-foreign', 'name' => 'udp_flood', 'settings' => ['addr' => '192.0.2.99']],
+            ['id' => 'f-unknown', 'name' => 'tcp_syn'],
+        ]);
+        Plugin::$pathNetFactory = function () use ($pathNet) {
+            return $pathNet;
+        };
+
+        $this->assertTrue(Plugin::cleanupPathNet(4242, '192.0.2.50'));
+
+        $this->assertContains(['deleteFilter', 'udp_flood', 'f-own'], $pathNet->calls);
+        $this->assertNotContains(['deleteFilter', 'udp_flood', 'f-foreign'], $pathNet->calls);
+        $this->assertNotContains(['deleteFilter', 'tcp_syn', 'f-unknown'], $pathNet->calls);
+        $this->assertCount(1, FrameworkSpy::$notifications);
+        $this->assertStringContainsString('f-foreign', FrameworkSpy::$notifications[0][0]);
     }
 
     /**
@@ -1121,6 +1207,7 @@ class PluginTest extends TestCase
             Plugin::PATHNET_SERVICE_TYPE => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
         ];
         DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+        DbDouble::willReturnRowsFor('from floating_ips where', []);
         $pathNet = $this->pathNetDouble([['id' => 'r-1', 'destination' => '192.0.2.50']], [], ['detail' => 'Not Found']);
         Plugin::$pathNetFactory = function () use ($pathNet) {
             return $pathNet;
@@ -1179,7 +1266,7 @@ class PluginTest extends TestCase
      * @param  int|string $serviceType
      * @return void
      */
-    private function dispatchDeactivate($serviceType): void
+    private function dispatchDeactivate($serviceType, string $status = 'active'): void
     {
         $dispatcher = new EventDispatcher();
         foreach (Plugin::getHooks() as $hookName => $callback) {
@@ -1187,16 +1274,24 @@ class PluginTest extends TestCase
             $dispatcher->addListener($hookName, $callback);
         }
 
-        $service = new class ($serviceType) {
+        $service = new class ($serviceType, $status) {
             /** @var int|string */
             private $type;
+            /** @var string */
+            private $status;
 
             /**
              * @param int|string $type
              */
-            public function __construct($type)
+            public function __construct($type, string $status)
             {
                 $this->type = $type;
+                $this->status = $status;
+            }
+
+            public function getStatus()
+            {
+                return $this->status;
             }
 
             public function getId()

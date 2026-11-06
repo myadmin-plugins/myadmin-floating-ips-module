@@ -97,7 +97,7 @@ class Plugin
             } else {
                 myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
             }
-            if ($serviceClass->getType() == self::PATHNET_SERVICE_TYPE) {
+            if ($serviceClass->getType() == self::PATHNET_SERVICE_TYPE && self::pathNetCleanupAllowed($serviceClass, $ip, $db)) {
                 // the ip goes back to the pool: its next owner must not inherit this customer's Path.net rules
                 self::cleanupPathNet($serviceClass->getId(), $ip);
             }
@@ -105,13 +105,48 @@ class Plugin
     }
 
     /**
+     * Whether this deactivation may clean up the ip's Path.net rules.
+     *
+     * cancel_service() does not refuse a service that is already canceled, and a
+     * canceled row keeps its floating_ip_ip while the pool hands the ip to someone
+     * else. So a second cancel of an old service would wipe the new owner's rules.
+     * The cleanup only runs when this is the cancel of a live service (its status
+     * before this cancel was not canceled/expired) and no other floating ip
+     * service that is not canceled/expired holds the same ip. floating_ip_pool
+     * is not used for this: older services predate pool tracking (pool_order is
+     * null for some live ones).
+     *
+     * @param object                 $serviceClass the service being deactivated (status not yet changed)
+     * @param string                 $ip
+     * @param \MyDb\Mysqli\Db|object $db
+     * @return bool
+     */
+    private static function pathNetCleanupAllowed($serviceClass, $ip, $db)
+    {
+        $serviceId = $serviceClass->getId();
+        $status = (string) $serviceClass->getStatus();
+        if (in_array($status, ['canceled', 'expired'], true)) {
+            myadmin_log(self::$module, 'info', 'Path.net cleanup skipped for floating ip '.$serviceId.': it was already '.$status.' before this cancel', __LINE__, __FILE__, self::$module, $serviceId);
+            return false;
+        }
+        $db->query("select floating_ip_id from floating_ips where floating_ip_ip='".$db->real_escape((string) $ip)."' and floating_ip_id != ".(int) $serviceId." and floating_ip_status not in ('canceled','expired') limit 1", __LINE__, __FILE__);
+        if ($db->num_rows() > 0) {
+            $db->next_record(MYSQL_ASSOC);
+            myadmin_log(self::$module, 'warning', 'Path.net cleanup skipped for floating ip '.$serviceId.': '.$ip.' is held by floating ip '.($db->Record['floating_ip_id'] ?? '?'), __LINE__, __FILE__, self::$module, $serviceId);
+            return false;
+        }
+        return true;
+    }
+
+    /**
      * Deletes every Path.net firewall rule and filter for a canceled floating ip.
      *
-     * Runs from getDeactivate(), once per cancel. It never throws and never stops
-     * the cancel: a failure is logged and posted to chat for staff to clean up by
-     * hand. The rules and filters are listed for the ip and deleted one by one
-     * through the same per-id calls the client page uses (rules whose destination
-     * is not this ip are left alone). PathNet::deleteRuleByIp() is not used: it
+     * Runs from getDeactivate() only for the cancel of a live service whose ip no
+     * other live service holds (pathNetCleanupAllowed()). It never throws and
+     * never stops the cancel: a failure is logged and posted to chat for staff to
+     * clean up by hand. The rules and filters are listed for the ip and deleted
+     * one by one through the same per-id calls the client page uses; a rule whose
+     * destination, or a filter whose addr, is not this ip is left alone. PathNet::deleteRuleByIp() is not used: it
      * sends DELETE /rules, a route the Path.net API does not define (its bulk
      * delete is DELETE /rules/), and an empty ip in either bulk delete would be
      * an account-wide filter.
@@ -131,6 +166,7 @@ class Plugin
         }
         $deleted = 0;
         $failed = [];
+        $skipped = [];
         try {
             if (self::$pathNetFactory !== null) {
                 $pathNet = call_user_func(self::$pathNetFactory);
@@ -162,6 +198,13 @@ class Plugin
                     if ($filterId === '' || $filterName === '') {
                         continue;
                     }
+                    // like the rules: only a filter that names this ip, never on the ?addr= query alone
+                    $addr = is_array($filter) ? ($filter['addr'] ?? ($filter['settings']['addr'] ?? null)) : null;
+                    $addr = is_scalar($addr) ? trim((string) $addr) : '';
+                    if ($addr !== $ip && $addr !== $ip.'/32') {
+                        $skipped[] = 'filter '.$filterName.'/'.$filterId.' (addr '.json_encode($addr).')';
+                        continue;
+                    }
                     $response = $pathNet->deleteFilter($filterName, $filterId);
                     if (isset($response['acknowledged'])) {
                         $deleted++;
@@ -172,6 +215,11 @@ class Plugin
             }
         } catch (\Throwable $e) {
             $failed[] = get_class($e).': '.$e->getMessage();
+        }
+        if (!empty($skipped)) {
+            // a filter listed for this ip that does not name it: leave it, but tell staff
+            myadmin_log(self::$module, 'warning', 'Path.net cleanup for floating ip '.$serviceId.' ('.$ip.') left '.implode('; ', $skipped), __LINE__, __FILE__, self::$module, $serviceId);
+            chatNotify($label.' canceled; Path.net listed filter(s) for it that do not name the ip and were left alone: '.implode('; ', $skipped).' - please check them by hand', 'notifications');
         }
         if (empty($failed)) {
             myadmin_log(self::$module, 'info', 'Path.net cleanup for floating ip '.$serviceId.' ('.$ip.') removed '.$deleted.' rule(s)/filter(s)', __LINE__, __FILE__, self::$module, $serviceId);

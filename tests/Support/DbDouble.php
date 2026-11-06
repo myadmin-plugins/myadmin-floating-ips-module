@@ -27,6 +27,13 @@ final class DbDouble
     public static $nextRows = [];
 
     /**
+     * Rows for queries containing a given fragment, checked before $nextRows.
+     *
+     * @var array<string, array<int, array<string, mixed>>>
+     */
+    public static $rowsFor = [];
+
+    /**
      * @var array<string, mixed>
      */
     public $Record = [];
@@ -45,6 +52,17 @@ final class DbDouble
     {
         self::$queries = [];
         self::$nextRows = [];
+        self::$rowsFor = [];
+    }
+
+    /**
+     * Rows any query containing $fragment returns (instead of willReturnRows()).
+     *
+     * @param array<int, array<string, mixed>> $rows
+     */
+    public static function willReturnRowsFor(string $fragment, array $rows): void
+    {
+        self::$rowsFor[$fragment] = $rows;
     }
 
     /**
@@ -79,6 +97,12 @@ final class DbDouble
     {
         self::$queries[] = $sql;
         $this->rows = self::$nextRows;
+        foreach (self::$rowsFor as $fragment => $rows) {
+            if (strpos((string) $sql, $fragment) !== false) {
+                $this->rows = $rows;
+                break;
+            }
+        }
         $this->cursor = 0;
         $this->Record = [];
         return true;

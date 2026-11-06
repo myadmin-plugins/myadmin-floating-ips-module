@@ -97,9 +97,17 @@ class Plugin
             } else {
                 myadmin_log('myadmin', 'error', 'no ip found on switches for '.$targetIp, __LINE__, __FILE__);
             }
-            if ($serviceClass->getType() == self::PATHNET_SERVICE_TYPE && self::pathNetCleanupAllowed($serviceClass, $ip, $db)) {
-                // the ip goes back to the pool: its next owner must not inherit this customer's Path.net rules
-                self::cleanupPathNet($serviceClass->getId(), $ip);
+            if ($serviceClass->getType() == self::PATHNET_SERVICE_TYPE) {
+                $newStatus = $event->hasArgument('new_status') ? (string) $event->getArgument('new_status') : '';
+                if ($newStatus === 'expired') {
+                    // expiry does not free the ip: the pool keeps it for this service (setEnable/setReactivate hand
+                    // the same ip back), so the customer's rules stay until the ip really returns to the pool
+                    // (setTerminate, scripts/floating_ips/update_ip_table_free_ips.php -> cleanupReleasedIp())
+                    myadmin_log(self::$module, 'info', 'Path.net cleanup skipped for floating ip '.$serviceClass->getId().': it is expiring, the ip stays with it until it goes back to the pool', __LINE__, __FILE__, self::$module, $serviceClass->getId());
+                } elseif (self::pathNetCleanupAllowed($serviceClass, $ip, $db)) {
+                    // the ip goes back to the pool: its next owner must not inherit this customer's Path.net rules
+                    self::cleanupPathNet($serviceClass->getId(), $ip);
+                }
             }
         }
     }
@@ -129,20 +137,73 @@ class Plugin
             myadmin_log(self::$module, 'info', 'Path.net cleanup skipped for floating ip '.$serviceId.': it was already '.$status.' before this cancel', __LINE__, __FILE__, self::$module, $serviceId);
             return false;
         }
+        return !self::ipHeldByAnother($serviceId, $ip, $db);
+    }
+
+    /**
+     * Whether another floating ip service that is not canceled/expired holds the ip
+     * (logged when it does).
+     *
+     * @param int|string             $serviceId
+     * @param string                 $ip
+     * @param \MyDb\Mysqli\Db|object $db
+     * @return bool
+     */
+    private static function ipHeldByAnother($serviceId, $ip, $db)
+    {
         $db->query("select floating_ip_id from floating_ips where floating_ip_ip='".$db->real_escape((string) $ip)."' and floating_ip_id != ".(int) $serviceId." and floating_ip_status not in ('canceled','expired') limit 1", __LINE__, __FILE__);
         if ($db->num_rows() > 0) {
             $db->next_record(MYSQL_ASSOC);
             myadmin_log(self::$module, 'warning', 'Path.net cleanup skipped for floating ip '.$serviceId.': '.$ip.' is held by floating ip '.($db->Record['floating_ip_id'] ?? '?'), __LINE__, __FILE__, self::$module, $serviceId);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Cleans up the Path.net rules and filters of a floating ip that is going back
+     * to the pool.
+     *
+     * An expiring service keeps its ip (the cancel hook skips the cleanup for it),
+     * so this is called where the ip really returns to the pool: setTerminate() and
+     * scripts/floating_ips/update_ip_table_free_ips.php, right before pool_used=0.
+     * Only a Path.net floating ip (PATHNET_SERVICE_TYPE) is cleaned, and only when no
+     * other floating ip service that is not canceled/expired holds the ip. It never
+     * throws: a failure is logged and posted to chat, and the caller goes on.
+     *
+     * @param int|string                  $serviceId   floating ip service id
+     * @param int|string                  $serviceType its floating_ip_type
+     * @param string                      $ip          the floating ip
+     * @param \MyDb\Mysqli\Db|object|null $db          a handle that is free to run a query (default: a clone of the module's)
+     * @return bool true when the cleanup ran and finished
+     */
+    public static function cleanupReleasedIp($serviceId, $serviceType, $ip, $db = null)
+    {
+        try {
+            if ((int) $serviceType !== self::PATHNET_SERVICE_TYPE) {
+                return false;
+            }
+            if ($db === null) {
+                // a clone, so a caller iterating the module handle keeps its result set
+                $db = clone get_module_db(self::$module);
+            }
+            if (self::ipHeldByAnother($serviceId, $ip, $db)) {
+                return false;
+            }
+            return self::cleanupPathNet($serviceId, $ip);
+        } catch (\Throwable $e) {
+            myadmin_log(self::$module, 'error', 'Path.net cleanup for released floating ip '.$serviceId.' ('.json_encode($ip).') failed: '.get_class($e).': '.$e->getMessage(), __LINE__, __FILE__, self::$module, $serviceId);
+            chatNotify('Floating IP '.$serviceId.' ('.json_encode($ip).') went back to the pool but its Path.net cleanup failed ('.$e->getMessage().') - please remove its rules/filters by hand', 'notifications');
             return false;
         }
-        return true;
     }
 
     /**
      * Deletes every Path.net firewall rule and filter for a canceled floating ip.
      *
-     * Runs from getDeactivate() only for the cancel of a live service whose ip no
-     * other live service holds (pathNetCleanupAllowed()). It never throws and
+     * Runs from getDeactivate() only for the cancel (not the expiry) of a live
+     * service whose ip no other live service holds (pathNetCleanupAllowed()), and
+     * from cleanupReleasedIp() when an ip goes back to the pool. It never throws and
      * never stops the cancel: a failure is logged and posted to chat for staff to
      * clean up by hand. The rules and filters are listed for the ip and deleted
      * one by one through the same per-id calls the client page uses; a rule whose
@@ -386,6 +447,8 @@ class Plugin
                         $switchName = $db->Record['name'];
                         // assign ip
                         // add ip route
+                        // the ip goes back to the pool: clear its Path.net rules first (never throws)
+                        self::cleanupReleasedIp($serviceInfo[$settings['PREFIX'].'_id'], $serviceInfo[$settings['PREFIX'].'_type'], $ip, $db);
                         $db->query("update floating_ip_pool set pool_used=0, pool_order=null where pool_ip='{$ip}'", __LINE__, __FILE__);
                         $cmds = ['config t', 'no ip route '.$ip.'/32 '.$targetIp, 'end', 'copy run st'];
                         myadmin_log('myadmin', 'info', 'Running on Switch '.$switchName.': '.json_encode($cmds), __LINE__, __FILE__);

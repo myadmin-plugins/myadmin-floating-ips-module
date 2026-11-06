@@ -754,7 +754,7 @@ class PluginTest extends TestCase
         $ownMethods = array_filter($methods, function (\ReflectionMethod $m) {
             return $m->getDeclaringClass()->getName() === Plugin::class;
         });
-        $this->assertCount(6, $ownMethods);
+        $this->assertCount(7, $ownMethods);
     }
 
     /**
@@ -764,7 +764,7 @@ class PluginTest extends TestCase
      */
     public function testExpectedPublicMethods(): void
     {
-        $expected = ['__construct', 'getHooks', 'getDeactivate', 'cleanupPathNet', 'loadProcessing', 'getSettings'];
+        $expected = ['__construct', 'getHooks', 'getDeactivate', 'cleanupPathNet', 'cleanupReleasedIp', 'loadProcessing', 'getSettings'];
         foreach ($expected as $method) {
             $this->assertTrue(
                 $this->reflection->hasMethod($method),
@@ -1260,13 +1260,227 @@ class PluginTest extends TestCase
     }
 
     /**
+     * Expiry (billingd's cancel_service(..., 'expired')) does not free the ip: the
+     * pool keeps it for this service and a renewal hands the same ip back, so the
+     * customer's Path.net rules must survive it.
+     *
+     * @return void
+     */
+    public function testExpiryOfPathNetIpKeepsItsRules(): void
+    {
+        FrameworkSpy::reset();
+        FrameworkSpy::$serviceTypes = [
+            Plugin::PATHNET_SERVICE_TYPE => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
+        ];
+        DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+        DbDouble::willReturnRowsFor('from floating_ips where', []);
+        $built = false;
+        Plugin::$pathNetFactory = function () use (&$built) {
+            $built = true;
+            return $this->pathNetDouble([['id' => 'r-1', 'destination' => '192.0.2.50']], []);
+        };
+
+        $this->dispatchDeactivate(Plugin::PATHNET_SERVICE_TYPE, 'active', 'expired');
+
+        $this->assertFalse($built, 'an expiring service keeps its ip and its rules');
+        $this->assertSame([], DbDouble::queriesMatching('from floating_ips where'));
+        $this->assertCount(1, FrameworkSpy::$switchCommands, 'the route is still removed');
+        $skips = array_filter(FrameworkSpy::logsWithLevel('info'), static function (array $log) {
+            return strpos((string) $log[2], 'expiring') !== false;
+        });
+        $this->assertCount(1, $skips);
+    }
+
+    /**
+     * An ip going back to the pool has its Path.net rules and filters cleaned up
+     * when no other live service holds it.
+     *
+     * @return void
+     */
+    public function testCleanupReleasedIpCleansAFreedPathNetIp(): void
+    {
+        FrameworkSpy::reset();
+        DbDouble::willReturnRowsFor('from floating_ips where', []);
+        $pathNet = $this->pathNetDouble(
+            [['id' => 'r-1', 'destination' => '192.0.2.50/32']],
+            [['id' => 'f-1', 'name' => 'udp_flood', 'settings' => ['addr' => '192.0.2.50/32']]]
+        );
+        Plugin::$pathNetFactory = function () use ($pathNet) {
+            return $pathNet;
+        };
+
+        $this->assertTrue(Plugin::cleanupReleasedIp(4242, (string) Plugin::PATHNET_SERVICE_TYPE, '192.0.2.50', new DbDouble()));
+
+        $this->assertContains(['deleteRule', 'r-1'], $pathNet->calls);
+        $this->assertContains(['deleteFilter', 'udp_flood', 'f-1'], $pathNet->calls);
+        $holderQuery = DbDouble::queriesMatching('from floating_ips where');
+        $this->assertCount(1, $holderQuery);
+        $this->assertStringContainsString('floating_ip_id != 4242', $holderQuery[0]);
+        $this->assertSame([], FrameworkSpy::$notifications);
+    }
+
+    /**
+     * A plain floating ip, or an ip another live service holds, is left alone.
+     *
+     * @return void
+     */
+    public function testCleanupReleasedIpSkipsOtherTypesAndHeldIps(): void
+    {
+        FrameworkSpy::reset();
+        $built = false;
+        Plugin::$pathNetFactory = function () use (&$built) {
+            $built = true;
+            return $this->pathNetDouble([], []);
+        };
+
+        $this->assertFalse(Plugin::cleanupReleasedIp(4242, 11454, '192.0.2.50', new DbDouble()));
+        $this->assertSame([], DbDouble::$queries, 'a plain floating ip runs no query');
+
+        DbDouble::willReturnRowsFor('from floating_ips where', [['floating_ip_id' => 2685]]);
+        $this->assertFalse(Plugin::cleanupReleasedIp(4242, Plugin::PATHNET_SERVICE_TYPE, '192.0.2.50', new DbDouble()));
+
+        $this->assertFalse($built);
+        $this->assertNotEmpty(FrameworkSpy::logsWithLevel('warning'));
+    }
+
+    /**
+     * Whatever goes wrong, the caller (the pool release) goes on: nothing is thrown,
+     * and staff are told.
+     *
+     * @return void
+     */
+    public function testCleanupReleasedIpNeverThrows(): void
+    {
+        FrameworkSpy::reset();
+        $db = new class () {
+            public function query($sql, $line = null, $file = null)
+            {
+                throw new \RuntimeException('server has gone away');
+            }
+
+            public function real_escape($value)
+            {
+                return (string) $value;
+            }
+        };
+
+        $this->assertFalse(Plugin::cleanupReleasedIp(4242, Plugin::PATHNET_SERVICE_TYPE, '192.0.2.50', $db));
+        $this->assertCount(1, FrameworkSpy::$notifications);
+        $this->assertStringContainsString('server has gone away', FrameworkSpy::$notifications[0][0]);
+        $this->assertNotEmpty(FrameworkSpy::logsWithLevel('error'));
+    }
+
+    /**
+     * Terminate (billingd's removal) is where the ip goes back to the pool, so it
+     * cleans Path.net up before pool_used=0 hands the ip to the next customer.
+     *
+     * @return void
+     */
+    public function testTerminateCleansPathNetBeforeFreeingThePool(): void
+    {
+        FrameworkSpy::reset();
+        \MyAdmin\Orm\FloatingIpsOrmDouble::$calls = [];
+        FrameworkSpy::$serviceTypes = [
+            Plugin::PATHNET_SERVICE_TYPE => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => 'path'],
+        ];
+        DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+        DbDouble::willReturnRowsFor('from floating_ips where', []);
+        $pathNet = $this->pathNetDouble([['id' => 'r-1', 'destination' => '192.0.2.50/32']], []);
+        $poolFreedBeforeCleanup = null;
+        Plugin::$pathNetFactory = function () use ($pathNet, &$poolFreedBeforeCleanup) {
+            $poolFreedBeforeCleanup = DbDouble::queriesMatching('pool_used=0') !== [];
+            return $pathNet;
+        };
+
+        $this->runTerminate([
+            'floating_ip_id' => 4242,
+            'floating_ip_type' => Plugin::PATHNET_SERVICE_TYPE,
+            'floating_ip_ip' => '192.0.2.50',
+            'floating_ip_target_ip' => '198.51.100.10',
+            'floating_ip_custid' => 777,
+        ]);
+
+        $this->assertFalse($poolFreedBeforeCleanup, 'Path.net is cleaned before the pool frees the ip');
+        $this->assertContains(['deleteRule', 'r-1'], $pathNet->calls);
+        $this->assertCount(1, DbDouble::queriesMatching("pool_used=0, pool_order=null where pool_ip='192.0.2.50'"));
+        $this->assertContains(['setServerStatus', 'deleted'], \MyAdmin\Orm\FloatingIpsOrmDouble::$calls);
+    }
+
+    /**
+     * Terminating a plain floating ip frees the pool without touching Path.net.
+     *
+     * @return void
+     */
+    public function testTerminateOfPlainFloatingIpSkipsPathNet(): void
+    {
+        FrameworkSpy::reset();
+        FrameworkSpy::$serviceTypes = [
+            11454 => ['services_type' => App::FLOATING_IPS_SERVICE_TYPE, 'services_field1' => ''],
+        ];
+        DbDouble::willReturnRows([['name' => 'core-sw-1', 'ip' => '10.9.0.1']]);
+        $built = false;
+        Plugin::$pathNetFactory = function () use (&$built) {
+            $built = true;
+            return $this->pathNetDouble([], []);
+        };
+
+        $this->runTerminate([
+            'floating_ip_id' => 4242,
+            'floating_ip_type' => 11454,
+            'floating_ip_ip' => '192.0.2.50',
+            'floating_ip_target_ip' => '198.51.100.10',
+            'floating_ip_custid' => 777,
+        ]);
+
+        $this->assertFalse($built);
+        $this->assertCount(1, DbDouble::queriesMatching('pool_used=0'));
+    }
+
+    /**
+     * Run the setTerminate closure loadProcessing() registers, with $serviceInfo.
+     *
+     * @param  array<string, mixed> $serviceInfo
+     * @return void
+     */
+    private function runTerminate(array $serviceInfo): void
+    {
+        $handler = new class ($serviceInfo) {
+            /** @var array<string, callable> */
+            public $closures = [];
+            /** @var array<string, mixed> */
+            private $serviceInfo;
+
+            public function __construct(array $serviceInfo)
+            {
+                $this->serviceInfo = $serviceInfo;
+            }
+
+            public function __call($name, $args)
+            {
+                if (strpos($name, 'set') === 0 && isset($args[0]) && is_callable($args[0])) {
+                    $this->closures[substr($name, 3)] = $args[0];
+                }
+                return $this;
+            }
+
+            public function getServiceInfo()
+            {
+                return $this->serviceInfo;
+            }
+        };
+        Plugin::loadProcessing(new GenericEvent($handler));
+        $this->assertArrayHasKey('Terminate', $handler->closures);
+        ($handler->closures['Terminate'])($handler);
+    }
+
+    /**
      * Dispatch floating_ips.deactivate through a real dispatcher with the hooks the
      * plugin advertises, exactly as MyAdmin wires them up.
      *
      * @param  int|string $serviceType
      * @return void
      */
-    private function dispatchDeactivate($serviceType, string $status = 'active'): void
+    private function dispatchDeactivate($serviceType, string $status = 'active', string $newStatus = 'canceled'): void
     {
         $dispatcher = new EventDispatcher();
         foreach (Plugin::getHooks() as $hookName => $callback) {
@@ -1320,7 +1534,7 @@ class PluginTest extends TestCase
             }
         };
 
-        $dispatcher->dispatch(new GenericEvent($service), Plugin::$module . '.deactivate');
+        $dispatcher->dispatch(new GenericEvent($service, ['new_status' => $newStatus]), Plugin::$module . '.deactivate');
     }
 
     /**

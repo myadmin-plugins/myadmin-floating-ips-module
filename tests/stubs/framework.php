@@ -49,6 +49,46 @@ namespace MyAdmin {
     }
 }
 
+namespace MyAdmin\Orm {
+    /**
+     * The ORM row setTerminate() loads (get_orm_class_from_table() below names it).
+     */
+    class FloatingIpsOrmDouble
+    {
+        /** @var array<int, array<int, mixed>> */
+        public static $calls = [];
+
+        /**
+         * @param  int|string $id
+         * @return bool
+         */
+        public function load_real($id)
+        {
+            self::$calls[] = ['load_real', $id];
+            return true;
+        }
+
+        /**
+         * @param  string $status
+         * @return $this
+         */
+        public function setServerStatus($status)
+        {
+            self::$calls[] = ['setServerStatus', $status];
+            return $this;
+        }
+
+        /**
+         * @return bool
+         */
+        public function save()
+        {
+            self::$calls[] = ['save'];
+            return true;
+        }
+    }
+}
+
 namespace Detain\Sshwitch {
     use Detain\MyAdminFloatingIps\Tests\Support\FrameworkSpy;
 
@@ -117,6 +157,17 @@ namespace {
         function chatNotify(...$args)
         {
             FrameworkSpy::$notifications[] = $args;
+        }
+    }
+
+    if (!function_exists('get_orm_class_from_table')) {
+        /**
+         * @param  string $table
+         * @return string
+         */
+        function get_orm_class_from_table($table)
+        {
+            return 'FloatingIpsOrmDouble';
         }
     }
 
